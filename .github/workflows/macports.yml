@@ -1,82 +1,120 @@
 name: macports
+
 on:
-  workflow_dispatch: # 手动触发构建
+  workflow_dispatch:
 
 env:
-  CROSS_OVER_VERSION: "25.1.1"
-  BUNDLE_NAME: "Wine-CX-Build"
+  CC: ccache clang -arch x86_64
+  CXX: ccache clang++ -arch x86_64
+  i386_CC: ccache i686-w64-mingw32-gcc
+  x86_64_CC: ccache x86_64-w64-mingw32-gcc
+  CPATH: /opt/local/include
+  LIBRARY_PATH: /opt/local/lib
+  CFLAGS: "-O3 -march=skylake -g0"
+  CROSSCFLAGS: "-O3 -g0 -Wno-error=incompatible-pointer-types"
+  LDFLAGS: "-Wl,-headerpad_max_install_names -Wl,-rpath,@loader_path/../../Resources/lib -Wl,-rpath,/opt/local/lib"
+  MACOSX_DEPLOYMENT_TARGET: 11.0
+  WINE_CONFIGURE: ${{ github.workspace }}/wine/configure
+  BUILDROOT: ${{ github.workspace }}/build
+  INSTALL_DIR: ${{ github.workspace }}/install_tmp
+  BUNDLE_NAME: "Wine-CX-25-GPTK3-M4-Pro.wine"
 
 jobs:
-  build:
+  wine-crossover:
     runs-on: macos-latest
-    
+
     steps:
-      - name: Checkout Repository
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install Dependencies
+      - name: Bootstrap MacPorts
         run: |
-          brew install bison flex mingw-w64 pkg-config freetype gnutls molten-vk sdl2 ccache gstreamer gst-plugins-base
-          echo "/opt/homebrew/opt/bison/bin" >> $GITHUB_PATH
-          echo "/opt/homebrew/opt/flex/bin" >> $GITHUB_PATH
+          curl -LO https://raw.githubusercontent.com/Gcenx/crossover-wine-ci/main/.github/workflows/bootstrap.sh
+          chmod +x bootstrap.sh
+          ./bootstrap.sh
 
-      - name: Download Crossover Source
+      - name: Adding MacPorts into $PATH
         run: |
-          curl -L -O "https://media.codeweavers.com/pub/crossover/source/crossover-sources-${{ env.CROSS_OVER_VERSION }}.tar.gz"
-          mkdir -p wine-source
-          tar -xf "crossover-sources-${{ env.CROSS_OVER_VERSION }}.tar.gz" --strip-components=2 sources/wine
+          echo "/opt/local/bin" >> $GITHUB_PATH
+          echo "/opt/local/sbin" >> $GITHUB_PATH
 
-      - name: Configure Wine
+      - name: Install build dependencies
         run: |
-          mkdir build-dir
-          cd build-dir
-          
-          export SDK_PATH=$(xcrun --sdk macosx --show-sdk-path)
-          export CC="ccache clang"
-          export CXX="ccache clang++"
-          export CFLAGS="-target x86_64-apple-macos11.0 -isysroot $SDK_PATH -O3 -march=skylake -mtune=skylake -g0"
-          export LDFLAGS="-target x86_64-apple-macos11.0 -Wl,-headerpad_max_install_names -Wl,-rpath,@loader_path/../../Resources/lib -Wl,-rpath,/opt/homebrew/lib"
-          export i386_CC="/opt/homebrew/bin/i686-w64-mingw32-gcc"
-          export x86_64_CC="/opt/homebrew/bin/x86_64-w64-mingw32-gcc"
-          
-          ../wine-source/configure \
+          sudo port install bison ccache gettext mingw-w64 pkgconfig
+
+      - name: Install runtime dependencies (Added GStreamer for Hogwarts)
+        run: |
+          sudo port install \
+            freetype \
+            gettext-runtime \
+            gnutls-devel \
+            libinotify \
+            moltenvk \
+            libsdl2 \
+            gstreamer1 \
+            gstreamer1-gst-plugins-base
+
+      - name: Download Crossover 25.1.1
+        run: |
+          curl -L -o crossover-source.tar.gz https://media.codeweavers.com/pub/crossover/source/crossover-sources-25.1.1.tar.gz
+
+      - name: Extract Crossover Sources
+        run: |
+          mkdir -p wine
+          tar --strip-components=2 -xf crossover-source.tar.gz sources/wine
+
+      - name: Configure wine (Gcenx Base + GStreamer/Vulkan)
+        run: |
+          mkdir -p ${{ env.BUILDROOT }}/winecx
+          pushd ${{ env.BUILDROOT }}/winecx
+          ${{ env.WINE_CONFIGURE }} \
             --build=x86_64-apple-darwin \
             --prefix=/ \
-            --enable-archs=i386,x86_64 \
             --disable-tests \
-            --with-gnutls --with-vulkan --with-sdl --with-gstreamer --with-mingw \
-            --without-x --without-dbus --without-opengl
+            --enable-archs=i386,x86_64 \
+            --with-gnutls \
+            --with-vulkan \
+            --with-sdl \
+            --with-gstreamer \
+            --with-coreaudio \
+            --with-freetype \
+            --with-mingw \
+            --without-x \
+            --without-dbus \
+            --without-opengl
+          popd
 
-      - name: Compile Wine
+      - name: Build wine
         run: |
-          cd build-dir
+          pushd ${{ env.BUILDROOT }}/winecx
           make -j$(sysctl -n hw.ncpu)
+          popd
 
-      - name: Package App Bundle
+      - name: Install and Structure for Heroic
         run: |
-          cd build-dir
-          mkdir -p ../install_tmp
-          make install-image DESTDIR="$(pwd)/../install_tmp"
+          pushd ${{ env.BUILDROOT }}/winecx
+          make install-image DESTDIR="${{ env.INSTALL_DIR }}"
+          popd
           
-          cd ..
-          FINAL_DIR="${{ env.BUNDLE_NAME }}.wine"
-          mkdir -p "$FINAL_DIR/Contents/MacOS"
-          mkdir -p "$FINAL_DIR/Contents/Resources"
+          # 按照 macOS App Bundle 规范构建结构
+          FINAL_PATH="${{ github.workspace }}/${{ env.BUNDLE_NAME }}"
+          mkdir -p "$FINAL_BUNDLE/Contents/MacOS"
+          mkdir -p "$FINAL_BUNDLE/Contents/Resources"
           
-          # 按照 Heroic 要求的结构移动文件
-          cp -R install_tmp/bin/* "$FINAL_DIR/Contents/MacOS/"
-          cp -R install_tmp/lib "$FINAL_DIR/Contents/Resources/"
-          cp -R install_tmp/share "$FINAL_DIR/Contents/Resources/"
+          # 封装文件
+          cp -R ${{ env.INSTALL_DIR }}/bin/* "$FINAL_PATH/Contents/MacOS/"
+          cp -R ${{ env.INSTALL_DIR }}/lib "$FINAL_PATH/Contents/Resources/"
+          cp -R ${{ env.INSTALL_DIR }}/share "$FINAL_PATH/Contents/Resources/"
           
-          # 创建关键软链接
-          cd "$FINAL_DIR/Contents/MacOS"
+          # 关键链接：解决 Heroic 识别问题
+          cd "$FINAL_PATH/Contents/MacOS"
           ln -sf wineloader wine
           ln -sf wineloader wine64
           ln -sf ../Resources/lib lib
           ln -sf ../Resources/share share
 
-      - name: Upload Artifact
+      - name: Uploading Optimized Bundle
         uses: actions/upload-artifact@v4
         with:
           name: ${{ env.BUNDLE_NAME }}
-          path: ${{ env.BUNDLE_NAME }}.wine
+          path: ${{ env.BUNDLE_NAME }}
