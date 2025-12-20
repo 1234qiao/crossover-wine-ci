@@ -60,7 +60,7 @@ jobs:
             gst-plugins-good \
             gst-plugins-bad \
             gst-plugins-ugly \
-            gst-plugins-libav
+            gst-libav
 
       - name: Install runtime dependencies
         run: |
