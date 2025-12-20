@@ -67,7 +67,6 @@ jobs:
           sudo port install \
             freetype \
             gettext-runtime \
-            gnutls-devel \
             libinotify \
             moltenvk \
             libsdl2
