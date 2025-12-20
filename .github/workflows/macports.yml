@@ -10,39 +10,58 @@ env:
   x86_64_CC: ccache x86_64-w64-mingw32-gcc
   CPATH: /opt/local/include
   LIBRARY_PATH: /opt/local/lib
-  CFLAGS: "-O3 -march=skylake -g0"
-  CROSSCFLAGS: "-O3 -g0 -Wno-error=incompatible-pointer-types"
-  LDFLAGS: "-Wl,-headerpad_max_install_names -Wl,-rpath,@loader_path/../../Resources/lib -Wl,-rpath,/opt/local/lib"
-  MACOSX_DEPLOYMENT_TARGET: 11.0
-  WINE_CONFIGURE: ${{ github.workspace }}/wine/configure
-  BUILDROOT: ${{ github.workspace }}/build
-  INSTALL_DIR: ${{ github.workspace }}/install_tmp
-  BUNDLE_NAME: "Wine-CX-25-GPTK3-M4-Pro.wine"
+  CFLAGS: -O2
+  # gcc14.1 now sets -Werror-incompatible-pointer-types
+  CROSSCFLAGS: -O2 -Wno-error=incompatible-pointer-types
+  LDFLAGS: -Wl,-headerpad_max_install_names -Wl,-rpath,@loader_path/../../ -Wl,-rpath,/opt/local/lib
+  MACOSX_DEPLOYMENT_TARGET: 10.15
+  WINE_CONFIGURE: $GITHUB_WORKSPACE/wine/configure
+  BUILDROOT: $GITHUB_WORKSPACE/build
+  WINE_INSTALLROOT: install
 
 jobs:
   wine-crossover:
+    strategy:
+      fail-fast: false
+      matrix:
+        # Action only suports building 25.1.0 or later
+        CROSS_OVER_VERSION: [25.1.0]
+
     runs-on: macos-latest
+
+    env:
+      CROSS_OVER_SOURCE_URL: https://media.codeweavers.com/pub/crossover/source/crossover-sources-${{ matrix.CROSS_OVER_VERSION }}.tar.gz
+      CROSS_OVER_LOCAL_FILE: crossover-sources-${{ matrix.CROSS_OVER_VERSION }}
+      WINE_INSTALLATION: winecx-${{ matrix.CROSS_OVER_VERSION }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
       - name: Bootstrap MacPorts
-        run: |
-          curl -LO https://raw.githubusercontent.com/Gcenx/crossover-wine-ci/main/.github/workflows/bootstrap.sh
-          chmod +x bootstrap.sh
-          ./bootstrap.sh
+        run: . .github/workflows/bootstrap.sh
 
       - name: Adding MacPorts into $PATH
         run: |
+          set -eu
           echo "/opt/local/bin" >> $GITHUB_PATH
           echo "/opt/local/sbin" >> $GITHUB_PATH
 
       - name: Install build dependencies
         run: |
-          sudo port install bison ccache gettext mingw-w64 pkgconfig
+          sudo port install \
+            bison \
+            ccache \
+            gettext \
+            mingw-w64 \
+            pkgconfig \
+            gstreamer \
+            gst-plugins-base \
+            gst-plugins-good \
+            gst-plugins-bad \
+            gst-plugins-ugly
 
-      - name: Install runtime dependencies (Added GStreamer for Hogwarts)
+      - name: Install runtime dependencies
         run: |
           sudo port install \
             freetype \
@@ -50,71 +69,79 @@ jobs:
             gnutls-devel \
             libinotify \
             moltenvk \
-            libsdl2 \
-            gstreamer1 \
-            gstreamer1-gst-plugins-base
+            libsdl2
 
-      - name: Download Crossover 25.1.1
+      - name: Download Crossover Sources
         run: |
-          curl -L -o crossover-source.tar.gz https://media.codeweavers.com/pub/crossover/source/crossover-sources-25.1.1.tar.gz
+          curl -o ${{ env.CROSS_OVER_LOCAL_FILE }}.tar.gz ${{ env.CROSS_OVER_SOURCE_URL }}
 
       - name: Extract Crossover Sources
         run: |
-          mkdir -p wine
-          tar --strip-components=2 -xf crossover-source.tar.gz sources/wine
+          tar --strip-components=1 -xf ${{ env.CROSS_OVER_LOCAL_FILE }}.tar.gz sources/wine
 
-      - name: Configure wine (Gcenx Base + GStreamer/Vulkan)
+      - name: Configure wine
         run: |
           mkdir -p ${{ env.BUILDROOT }}/winecx
           pushd ${{ env.BUILDROOT }}/winecx
           ${{ env.WINE_CONFIGURE }} \
             --build=x86_64-apple-darwin \
-            --prefix=/ \
+            --prefix= \
             --disable-tests \
             --enable-archs=i386,x86_64 \
-            --with-gnutls \
-            --with-vulkan \
-            --with-sdl \
-            --with-gstreamer \
+            --without-alsa \
+            --without-capi \
             --with-coreaudio \
-            --with-freetype \
-            --with-mingw \
-            --without-x \
+            --with-cups \
             --without-dbus \
-            --without-opengl
+            --without-ffmpeg \
+            --without-fontconfig \
+            --with-freetype \
+            --with-gettext \
+            --without-gettextpo \
+            --without-gphoto \
+            --with-gnutls \
+            --without-gssapi \
+            --without-gstreamer \
+            --with-inotify \
+            --without-krb5 \
+            --with-mingw \
+            --without-netapi \
+            --with-opencl \
+            --without-opengl \
+            --without-oss \
+            --with-pcap \
+            --with-pthread \
+            --without-pulse \
+            --without-sane \
+            --with-sdl \
+            --without-udev \
+            --with-unwind \
+            --without-usb \
+            --without-v4l2 \
+            --with-vulkan \
+            --without-wayland \
+            --without-x \
+            --with-gstreamer
           popd
 
       - name: Build wine
         run: |
           pushd ${{ env.BUILDROOT }}/winecx
-          make -j$(sysctl -n hw.ncpu)
+          make -j$(sysctl -n hw.ncpu 2>/dev/null)
           popd
 
-      - name: Install and Structure for Heroic
+      - name: Install wine
         run: |
           pushd ${{ env.BUILDROOT }}/winecx
-          make install-image DESTDIR="${{ env.INSTALL_DIR }}"
+          make install-image DESTDIR="$GITHUB_WORKSPACE/${{ env.WINE_INSTALLROOT }}"
           popd
-          
-          # 按照 macOS App Bundle 规范构建结构
-          FINAL_PATH="${{ github.workspace }}/${{ env.BUNDLE_NAME }}"
-          mkdir -p "$FINAL_BUNDLE/Contents/MacOS"
-          mkdir -p "$FINAL_BUNDLE/Contents/Resources"
-          
-          # 封装文件
-          cp -R ${{ env.INSTALL_DIR }}/bin/* "$FINAL_PATH/Contents/MacOS/"
-          cp -R ${{ env.INSTALL_DIR }}/lib "$FINAL_PATH/Contents/Resources/"
-          cp -R ${{ env.INSTALL_DIR }}/share "$FINAL_PATH/Contents/Resources/"
-          
-          # 关键链接：解决 Heroic 识别问题
-          cd "$FINAL_PATH/Contents/MacOS"
-          ln -sf wineloader wine
-          ln -sf wineloader wine64
-          ln -sf ../Resources/lib lib
-          ln -sf ../Resources/share share
 
-      - name: Uploading Optimized Bundle
+      - name: Tar wine
+        run: |
+          tar -czvf ${{ env.WINE_INSTALLATION }}.tar.gz ${{ env.WINE_INSTALLROOT }}
+
+      - name: Uploading wine
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ env.BUNDLE_NAME }}
-          path: ${{ env.BUNDLE_NAME }}
+          name: ${{ env.WINE_INSTALLATION }}
+          path: ${{ env.WINE_INSTALLATION }}.tar.gz
