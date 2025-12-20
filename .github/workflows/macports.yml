@@ -55,12 +55,12 @@ jobs:
             gettext \
             mingw-w64 \
             pkgconfig \
-            gstreamer \
-            gst-plugins-base \
-            gst-plugins-good \
-            gst-plugins-bad \
-            gst-plugins-ugly \
-            gst-libav
+            gstreamer1 \
+            gstreamer1-gst-plugins-base \
+            gstreamer1-gst-plugins-good \
+            gstreamer1-gst-plugins-bad \
+            gstreamer1-gst-plugins-ugly \
+            gstreamer1-gst-libav
 
       - name: Install runtime dependencies
         run: |
