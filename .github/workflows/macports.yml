@@ -1,137 +1,82 @@
-name: macports-heroic-optimized
-
+name: macports
 on:
-  workflow_dispatch:
+  workflow_dispatch: # 手动触发构建
 
 env:
-  CC: ccache clang -arch x86_64
-  CXX: ccache clang++ -arch x86_64
-  i386_CC: ccache i686-w64-mingw32-gcc
-  x86_64_CC: ccache x86_64-w64-mingw32-gcc
-  CPATH: /opt/local/include
-  LIBRARY_PATH: /opt/local/lib
-  CFLAGS: -O2
-  CROSSCFLAGS: -O2 -Wno-error=incompatible-pointer-types
-  # 增强 LDFLAGS 确保库文件搜索路径
-  LDFLAGS: -Wl,-headerpad_max_install_names -Wl,-rpath,@loader_path/../../Resources/lib -Wl,-rpath,@loader_path/../Resources/lib -Wl,-rpath,/opt/local/lib
-  MACOSX_DEPLOYMENT_TARGET: 10.15
-  WINE_CONFIGURE: $GITHUB_WORKSPACE/wine/configure
-  BUILDROOT: $GITHUB_WORKSPACE/build
-  WINE_INSTALLROOT: install_tmp
-  # 最终生成的 Bundle 名称
-  BUNDLE_NAME: "Wine-Crossover-Heroic.wine"
+  CROSS_OVER_VERSION: "25.1.1"
+  BUNDLE_NAME: "Wine-CX-Build"
 
 jobs:
-  wine-crossover:
+  build:
     runs-on: macos-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        CROSS_OVER_VERSION: [25.1.1]
-
-    env:
-      CROSS_OVER_SOURCE_URL: https://media.codeweavers.com/pub/crossover/source/crossover-sources-${{ matrix.CROSS_OVER_VERSION }}.tar.gz
-      CROSS_OVER_LOCAL_FILE: crossover-sources-${{ matrix.CROSS_OVER_VERSION }}
-      WINE_INSTALLATION: winecx-${{ matrix.CROSS_OVER_VERSION }}-heroic
-
+    
     steps:
-      - name: Checkout
+      - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Bootstrap MacPorts
-        run: . .github/workflows/bootstrap.sh
-
-      - name: Adding MacPorts into $PATH
+      - name: Install Dependencies
         run: |
-          echo "/opt/local/bin" >> $GITHUB_PATH
-          echo "/opt/local/sbin" >> $GITHUB_PATH
+          brew install bison flex mingw-w64 pkg-config freetype gnutls molten-vk sdl2 ccache gstreamer gst-plugins-base
+          echo "/opt/homebrew/opt/bison/bin" >> $GITHUB_PATH
+          echo "/opt/homebrew/opt/flex/bin" >> $GITHUB_PATH
 
-      - name: Install build dependencies
+      - name: Download Crossover Source
         run: |
-          sudo port install bison ccache gettext mingw-w64 pkgconfig
+          curl -L -O "https://media.codeweavers.com/pub/crossover/source/crossover-sources-${{ env.CROSS_OVER_VERSION }}.tar.gz"
+          mkdir -p wine-source
+          tar -xf "crossover-sources-${{ env.CROSS_OVER_VERSION }}.tar.gz" --strip-components=2 sources/wine
 
-      - name: Install runtime dependencies
+      - name: Configure Wine
         run: |
-          sudo port install freetype gettext-runtime gnutls-devel libinotify moltenvk libsdl2
-
-      - name: Download Crossover Sources
-        run: |
-          curl -o ${{ env.CROSS_OVER_LOCAL_FILE }}.tar.gz ${{ env.CROSS_OVER_SOURCE_URL }}
-
-      - name: Extract Crossover Sources
-        run: |
-          tar --strip-components=1 -xf ${{ env.CROSS_OVER_LOCAL_FILE }}.tar.gz sources/wine
-
-      - name: Configure wine
-        run: |
-          mkdir -p ${{ env.BUILDROOT }}/winecx
-          pushd ${{ env.BUILDROOT }}/winecx
-          ${{ env.WINE_CONFIGURE }} \
+          mkdir build-dir
+          cd build-dir
+          
+          export SDK_PATH=$(xcrun --sdk macosx --show-sdk-path)
+          export CC="ccache clang"
+          export CXX="ccache clang++"
+          export CFLAGS="-target x86_64-apple-macos11.0 -isysroot $SDK_PATH -O3 -march=skylake -mtune=skylake -g0"
+          export LDFLAGS="-target x86_64-apple-macos11.0 -Wl,-headerpad_max_install_names -Wl,-rpath,@loader_path/../../Resources/lib -Wl,-rpath,/opt/homebrew/lib"
+          export i386_CC="/opt/homebrew/bin/i686-w64-mingw32-gcc"
+          export x86_64_CC="/opt/homebrew/bin/x86_64-w64-mingw32-gcc"
+          
+          ../wine-source/configure \
             --build=x86_64-apple-darwin \
             --prefix=/ \
-            --disable-tests \
             --enable-archs=i386,x86_64 \
-            --with-coreaudio \
-            --with-freetype \
-            --with-gnutls \
-            --with-inotify \
-            --with-mingw \
-            --with-pcap \
-            --with-pthread \
-            --with-sdl \
-            --with-vulkan \
-            --without-x \
-            --without-opengl \
-            --without-oss \
-            --without-alsa \
-            --without-gstreamer \
-            --without-dbus
-          popd
+            --disable-tests \
+            --with-gnutls --with-vulkan --with-sdl --with-gstreamer --with-mingw \
+            --without-x --without-dbus --without-opengl
 
-      - name: Build wine
+      - name: Compile Wine
         run: |
-          pushd ${{ env.BUILDROOT }}/winecx
+          cd build-dir
           make -j$(sysctl -n hw.ncpu)
-          popd
 
-      - name: Create Heroic-Compatible Bundle
+      - name: Package App Bundle
         run: |
-          # 1. 创建符合 Heroic 扫描习惯的结构
-          FINAL_DEST="$GITHUB_WORKSPACE/${{ env.BUNDLE_NAME }}"
-          mkdir -p "$FINAL_DEST/Contents/MacOS"
-          mkdir -p "$FINAL_DEST/Contents/Resources"
+          cd build-dir
+          mkdir -p ../install_tmp
+          make install-image DESTDIR="$(pwd)/../install_tmp"
           
-          # 2. 先安装到临时目录
-          pushd ${{ env.BUILDROOT }}/winecx
-          make install-image DESTDIR="$GITHUB_WORKSPACE/${{ env.WINE_INSTALLROOT }}"
-          popd
+          cd ..
+          FINAL_DIR="${{ env.BUNDLE_NAME }}.wine"
+          mkdir -p "$FINAL_DIR/Contents/MacOS"
+          mkdir -p "$FINAL_DIR/Contents/Resources"
           
-          # 3. 移动文件到 Bundle 结构中
-          # 将 bin 目录下的所有文件移到 Contents/MacOS
-          cp -R "$GITHUB_WORKSPACE/${{ env.WINE_INSTALLROOT }}/bin/"* "$FINAL_DEST/Contents/MacOS/"
+          # 按照 Heroic 要求的结构移动文件
+          cp -R install_tmp/bin/* "$FINAL_DIR/Contents/MacOS/"
+          cp -R install_tmp/lib "$FINAL_DIR/Contents/Resources/"
+          cp -R install_tmp/share "$FINAL_DIR/Contents/Resources/"
           
-          # 将 lib 和 share 移到 Contents/Resources
-          cp -R "$GITHUB_WORKSPACE/${{ env.WINE_INSTALLROOT }}/lib" "$FINAL_DEST/Contents/Resources/"
-          cp -R "$GITHUB_WORKSPACE/${{ env.WINE_INSTALLROOT }}/share" "$FINAL_DEST/Contents/Resources/"
-          
-          # 4. 创建核心软链接（让 Heroic 能认出 wine）
-          pushd "$FINAL_DEST/Contents/MacOS"
+          # 创建关键软链接
+          cd "$FINAL_DIR/Contents/MacOS"
           ln -sf wineloader wine
           ln -sf wineloader wine64
-          # 为了确保 wine 运行正常，MacOS 目录下也放一个 lib 和 share 的指向链接
           ln -sf ../Resources/lib lib
           ln -sf ../Resources/share share
-          popd
-          
-          # 5. 权限处理
-          chmod +x "$FINAL_DEST/Contents/MacOS/"*
 
-      - name: Tar wine bundle
-        run: |
-          tar -czvf ${{ env.WINE_INSTALLATION }}.tar.gz "${{ env.BUNDLE_NAME }}"
-
-      - name: Uploading wine
+      - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ env.WINE_INSTALLATION }}
-          path: ${{ env.WINE_INSTALLATION }}.tar.gz
+          name: ${{ env.BUNDLE_NAME }}
+          path: ${{ env.BUNDLE_NAME }}.wine
